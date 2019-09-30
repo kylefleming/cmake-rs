@@ -318,6 +318,10 @@ impl Config {
         let host = self.host.clone().unwrap_or_else(|| getenv_unwrap("HOST"));
         let msvc = target.contains("msvc");
         let ndk = self.uses_android_ndk();
+        let generic_target = Target { rust_target: target.clone() };
+        let is_apple_target = generic_target.is_apple_target();
+        let is_ios_target = generic_target.is_ios_target();
+        let no_default_flags = ndk || is_ios_target;
         let mut c_cfg = cc::Build::new();
         c_cfg
             .cargo_metadata(false)
@@ -325,7 +329,7 @@ impl Config {
             .debug(false)
             .warnings(false)
             .host(&host)
-            .no_default_flags(ndk);
+            .no_default_flags(no_default_flags);
         if !ndk {
             c_cfg.target(&target);
         }
@@ -337,7 +341,7 @@ impl Config {
             .debug(false)
             .warnings(false)
             .host(&host)
-            .no_default_flags(ndk);
+            .no_default_flags(no_default_flags);
         if !ndk {
             cxx_cfg.target(&target);
         }
@@ -479,6 +483,34 @@ impl Config {
             if !self.defined("CMAKE_SYSTEM_NAME") {
                 cmd.arg("-DCMAKE_SYSTEM_NAME=SunOS");
             }
+        } else if is_apple_target {
+            let apple_target =
+                generic_target.apple_target().expect("Unknown architecture for iOS target");
+
+            if !self.defined("CMAKE_OSX_ARCHITECTURES") {
+                cmd.arg(format!(
+                    "-DCMAKE_OSX_ARCHITECTURES={}",
+                    apple_target.cmake_target_arch()
+                ));
+            }
+
+            if !self.defined("CMAKE_SYSTEM_NAME") {
+                cmd.arg(format!(
+                    "-DCMAKE_SYSTEM_NAME={}",
+                    apple_target.cmake_system_name()
+                ));
+            }
+
+            if !self.defined("CMAKE_OSX_DEPLOYMENT_TARGET") {
+                cmd.arg(format!(
+                    "-DCMAKE_OSX_DEPLOYMENT_TARGET={}",
+                    apple_target.deployment_target()
+                ));
+            }
+
+            if !self.defined("CMAKE_OSX_SYSROOT") {
+                cmd.arg(format!("-DCMAKE_OSX_SYSROOT={}", apple_target.sdk_name()));
+            }
         }
         if let Some(ref generator) = self.generator {
             cmd.arg("-G").arg(generator);
@@ -591,6 +623,9 @@ impl Config {
                         }
                         flagsflag.push(" ");
                         flagsflag.push(arg);
+                    }
+                    if is_ios_target {
+                        flagsflag.push(" -fPIC -fembed-bitcode");
                     }
                     cmd.arg(flagsflag);
                 }
@@ -831,6 +866,115 @@ impl Config {
                 }
                 break;
             }
+        }
+    }
+}
+
+struct Target {
+    rust_target: String,
+}
+
+impl Target {
+    fn is_apple_target(&self) -> bool {
+        AppleTarget::is_apple_target(&self.rust_target)
+    }
+
+    fn is_ios_target(&self) -> bool {
+        self.rust_target.ends_with("-apple-ios")
+    }
+
+    fn apple_target(&self) -> Option<AppleTarget> {
+        AppleTarget::apple_target(&self.rust_target)
+    }
+}
+
+struct AppleTarget {
+    rust_target: String,
+    rust_target_arch: String,
+}
+
+impl AppleTarget {
+    fn is_apple_target(target_name: &str) -> bool {
+        let is_apple_vendor = match target_name.split('-').nth(1) {
+            Some(vendor) => vendor == "apple",
+            None => false,
+        };
+        let is_apple_platform = match target_name.split('-').nth(2) {
+            Some(platform) => platform == "ios" || platform == "darwin",
+            None => false,
+        };
+        is_apple_vendor && is_apple_platform
+    }
+
+    fn apple_target(target_name: &str) -> Option<AppleTarget> {
+        if AppleTarget::is_apple_target(target_name) {
+            let rust_target_arch = target_name
+                .split('-')
+                .nth(0)
+                .expect(&format!("Unknown architecture for Apple target: {}", target_name))
+                .into();
+            Some(AppleTarget {
+                rust_target: target_name.into(),
+                rust_target_arch,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn is_ios_target(&self) -> bool {
+        self.rust_target.ends_with("-apple-ios")
+    }
+
+    fn is_osx_target(&self) -> bool {
+        self.rust_target.ends_with("-apple-darwin")
+    }
+
+    fn cmake_system_name(&self) -> String {
+        if self.is_ios_target() {
+            "iOS"
+        } else if self.is_osx_target() {
+            "Darwin"
+        } else {
+            panic!(format!("Unknown Apple target: {}", self.rust_target))
+        }
+        .into()
+    }
+
+    fn cmake_target_arch(&self) -> String {
+        match self.rust_target_arch.as_str() {
+            "aarch64" => "arm64",
+            "armv7" => "armv7",
+            "armv7s" => "armv7s",
+            "i386" => "i386",
+            "x86_64" => "x86_64",
+            _ => panic!(format!("Unknown architecture for Apple target: {}", self.rust_target_arch)),
+        }
+        .into()
+    }
+
+    fn sdk_name(&self) -> String {
+        if self.is_ios_target() {
+            match self.rust_target_arch.as_str() {
+                "aarch64" | "armv7" | "armv7s" => "iphoneos",
+                "i386" | "x86_64" => "iphonesimulator",
+                _ => panic!(format!("Unknown architecture for Apple target: {}", self.rust_target_arch)),
+            }
+        } else if self.is_osx_target() {
+            "macosx"
+        } else {
+            panic!(format!("Unknown Apple target: {}", self.rust_target))
+        }
+        .into()
+    }
+
+    fn deployment_target(&self) -> String {
+        if self.is_ios_target() {
+            std::env::var("IPHONEOS_DEPLOYMENT_TARGET").unwrap_or_else(|_| "7.0".into())
+        } else if self.is_osx_target() {
+            std::env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "10.3".into())
+        } else {
+            panic!(format!("Unknown Apple target: {}", self.rust_target))
         }
     }
 }
