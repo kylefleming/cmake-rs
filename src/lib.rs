@@ -318,6 +318,8 @@ impl Config {
         let host = self.host.clone().unwrap_or_else(|| getenv_unwrap("HOST"));
         let msvc = target.contains("msvc");
         let ndk = self.uses_android_ndk();
+        let ios = IosTarget::is_ios_target(&target);
+        let no_default_flags = ndk || ios;
         let mut c_cfg = cc::Build::new();
         c_cfg
             .cargo_metadata(false)
@@ -325,7 +327,7 @@ impl Config {
             .debug(false)
             .warnings(false)
             .host(&host)
-            .no_default_flags(ndk);
+            .no_default_flags(no_default_flags);
         if !ndk {
             c_cfg.target(&target);
         }
@@ -337,7 +339,7 @@ impl Config {
             .debug(false)
             .warnings(false)
             .host(&host)
-            .no_default_flags(ndk);
+            .no_default_flags(no_default_flags);
         if !ndk {
             cxx_cfg.target(&target);
         }
@@ -479,6 +481,29 @@ impl Config {
             if !self.defined("CMAKE_SYSTEM_NAME") {
                 cmd.arg("-DCMAKE_SYSTEM_NAME=SunOS");
             }
+        } else if ios {
+            let ios_target =
+                IosTarget::ios_target(&target).expect("Unknown architecture for iOS target");
+            if !self.defined("CMAKE_SYSTEM_NAME") {
+                cmd.arg("-DCMAKE_SYSTEM_NAME=iOS");
+            }
+
+            if !self.defined("CMAKE_OSX_ARCHITECTURES") {
+                cmd.arg(format!(
+                    "-DCMAKE_OSX_ARCHITECTURES={}",
+                    ios_target.cmake_target_arch()
+                ));
+            }
+
+            if !self.defined("CMAKE_OSX_DEPLOYMENT_TARGET") {
+                let min_version =
+                    std::env::var("IPHONEOS_DEPLOYMENT_TARGET").unwrap_or_else(|_| "7.0".into());
+                cmd.arg(format!("-DCMAKE_OSX_DEPLOYMENT_TARGET={}", min_version));
+            }
+
+            if !self.defined("CMAKE_OSX_SYSROOT") {
+                cmd.arg(format!("-DCMAKE_OSX_SYSROOT={}", ios_target.sdk_name()));
+            }
         }
         if let Some(ref generator) = self.generator {
             cmd.arg("-G").arg(generator);
@@ -591,6 +616,9 @@ impl Config {
                         }
                         flagsflag.push(" ");
                         flagsflag.push(arg);
+                    }
+                    if ios {
+                        flagsflag.push(" -fPIC -fembed-bitcode");
                     }
                     cmd.arg(flagsflag);
                 }
@@ -832,6 +860,50 @@ impl Config {
                 break;
             }
         }
+    }
+}
+
+struct IosTarget {
+    rust_target_arch: String,
+}
+
+impl IosTarget {
+    fn is_ios_target(target_name: &str) -> bool {
+        target_name.ends_with("-apple-ios")
+    }
+
+    fn ios_target(target_name: &str) -> Option<IosTarget> {
+        if IosTarget::is_ios_target(target_name) {
+            let rust_target_arch = target_name
+                .split('-')
+                .nth(0)
+                .expect("Unknown architecture for iOS target.")
+                .into();
+            Some(IosTarget { rust_target_arch })
+        } else {
+            None
+        }
+    }
+
+    fn cmake_target_arch(&self) -> String {
+        match self.rust_target_arch.as_str() {
+            "aarch64" => "arm64",
+            "armv7" => "armv7",
+            "armv7s" => "armv7s",
+            "i386" => "i386",
+            "x86_64" => "x86_64",
+            _ => panic!("Unknown architecture for iOS target."),
+        }
+        .into()
+    }
+
+    fn sdk_name(&self) -> String {
+        match self.rust_target_arch.as_str() {
+            "aarch64" | "armv7" | "armv7s" => "iphoneos",
+            "i386" | "x86_64" => "iphonesimulator",
+            _ => panic!("Unknown architecture for iOS target."),
+        }
+        .into()
     }
 }
 
