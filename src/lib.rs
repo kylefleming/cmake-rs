@@ -318,6 +318,8 @@ impl Config {
         let host = self.host.clone().unwrap_or_else(|| getenv_unwrap("HOST"));
         let msvc = target_triplet.contains("msvc");
         let ndk = self.uses_android_ndk();
+        let target = Target::new(&target_triplet);
+        let no_default_flags = ndk || target.is_ios_target();
         let mut c_cfg = cc::Build::new();
         c_cfg
             .cargo_metadata(false)
@@ -325,7 +327,7 @@ impl Config {
             .debug(false)
             .warnings(false)
             .host(&host)
-            .no_default_flags(ndk);
+            .no_default_flags(no_default_flags);
         if !ndk {
             c_cfg.target(&target_triplet);
         }
@@ -337,7 +339,7 @@ impl Config {
             .debug(false)
             .warnings(false)
             .host(&host)
-            .no_default_flags(ndk);
+            .no_default_flags(no_default_flags);
         if !ndk {
             cxx_cfg.target(&target_triplet);
         }
@@ -479,6 +481,32 @@ impl Config {
             if !self.defined("CMAKE_SYSTEM_NAME") {
                 cmd.arg("-DCMAKE_SYSTEM_NAME=SunOS");
             }
+        } else if target.is_apple_target() {
+            if !self.defined("CMAKE_OSX_ARCHITECTURES") {
+                if let Some(cmake_target_arch) = target.cmake_target_arch() {
+                    cmd.arg(format!("-DCMAKE_OSX_ARCHITECTURES={}", cmake_target_arch));
+                }
+            }
+
+            if !self.defined("CMAKE_OSX_SYSROOT") {
+                if let Some(sdk_name) = target.sdk_name() {
+                    cmd.arg(format!("-DCMAKE_OSX_SYSROOT={}", sdk_name));
+                }
+            }
+
+            if !self.defined("CMAKE_OSX_DEPLOYMENT_TARGET") {
+                if let Some(deployment_target) = target.deployment_target() {
+                    cmd.arg(format!("-DCMAKE_OSX_DEPLOYMENT_TARGET={}", deployment_target));
+                }
+            }
+
+            if target.is_cross_compiling() {
+                if !self.defined("CMAKE_SYSTEM_NAME") {
+                    if let Some(cmake_system_name) = target.cmake_system_name() {
+                        cmd.arg(format!("-DCMAKE_SYSTEM_NAME={}", cmake_system_name));
+                    }
+                }
+            }
         }
         if let Some(ref generator) = self.generator {
             cmd.arg("-G").arg(generator);
@@ -591,6 +619,11 @@ impl Config {
                         }
                         flagsflag.push(" ");
                         flagsflag.push(arg);
+                    }
+                    if no_default_flags {
+                        if target.is_ios_target() {
+                            flagsflag.push(" -fPIC -fembed-bitcode");
+                        }
                     }
                     cmd.arg(flagsflag);
                 }
@@ -831,6 +864,111 @@ impl Config {
                 }
                 break;
             }
+        }
+    }
+}
+
+struct Target {
+    rust_target: String,
+    rust_target_arch: String,
+    rust_target_vendor: String,
+    rust_target_platform: String,
+}
+
+impl Target {
+    pub fn new(target_triplet: &str) -> Target {
+        let parts: Vec<&str> = target_triplet.split('-').collect();
+        if parts.len() < 3 {
+            fail(&format!("target triplet not in the form arch-vendor-platform: {}", target_triplet));
+        }
+
+        Target {
+            rust_target: target_triplet.to_owned(),
+            rust_target_arch: parts[0].to_owned(),
+            rust_target_vendor: parts[1].to_owned(),
+            rust_target_platform: parts[2].to_owned(),
+        }
+    }
+
+    fn is_apple_target(&self) -> bool {
+        self.is_ios_target() || self.is_osx_target()
+    }
+
+    fn is_ios_target(&self) -> bool {
+        &self.rust_target_vendor == "apple" && &self.rust_target_platform == "ios"
+    }
+
+    fn is_osx_target(&self) -> bool {
+        &self.rust_target_vendor == "apple" && &self.rust_target_platform == "darwin"
+    }
+
+    fn is_cross_compiling(&self) -> bool {
+        self.is_ios_target()
+    }
+
+    fn cmake_system_name(&self) -> Option<String> {
+        if !self.is_cross_compiling() {
+            eprintln!("Warning: cmake_system_name should only be used for cross-compiled targets. Target: {}", self.rust_target);
+            None
+        } else if self.is_ios_target() {
+            Some("iOS".to_owned())
+        } else {
+            eprintln!("Warning: unknown system name for target: {}", self.rust_target);
+            None
+        }
+    }
+
+    fn cmake_target_arch(&self) -> Option<String> {
+        if !self.is_apple_target() {
+            eprintln!("Warning: sdk_name only supported for Apple targets. Target: {}", self.rust_target);
+            None
+        } else {
+            match self.rust_target_arch.as_str() {
+                "aarch64" => Some("arm64".to_owned()),
+                "armv7" => Some("armv7".to_owned()),
+                "armv7s" => Some("armv7s".to_owned()),
+                "i386" => Some("i386".to_owned()),
+                "x86_64" => Some("x86_64".to_owned()),
+                _ => {
+                    eprintln!("Warning: unknown architecture for target: {}", self.rust_target_arch);
+                    None
+                }
+            }
+        }
+    }
+
+    fn sdk_name(&self) -> Option<String> {
+        if !self.is_apple_target() {
+            eprintln!("Warning: sdk_name only supported for Apple targets. Target: {}", self.rust_target);
+            None
+        } else if self.is_ios_target() {
+            match self.rust_target_arch.as_str() {
+                "aarch64" | "armv7" | "armv7s" => Some("iphoneos".to_owned()),
+                "i386" | "x86_64" => Some("iphonesimulator".to_owned()),
+                _ => {
+                    eprintln!("Warning: unknown architecture for Apple target: {}", self.rust_target_arch);
+                    None
+                },
+            }
+        } else if self.is_osx_target() {
+            Some("macosx".to_owned())
+        } else {
+            eprintln!("Warning: unknown sdk name for target: {}", self.rust_target);
+            None
+        }
+    }
+
+    fn deployment_target(&self) -> Option<String> {
+        if !self.is_apple_target() {
+            eprintln!("Warning: deployment_target only supported for Apple targets. Target: {}", self.rust_target);
+            None
+        } else if self.is_ios_target() {
+            Some(std::env::var("IPHONEOS_DEPLOYMENT_TARGET").unwrap_or_else(|_| "7.0".into()))
+        } else if self.is_osx_target() {
+            Some(std::env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "10.6".into()))
+        } else {
+            eprintln!("Warning: unknown deployment target for target: {}", self.rust_target);
+            None
         }
     }
 }
