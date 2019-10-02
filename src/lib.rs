@@ -305,7 +305,7 @@ impl Config {
     /// This will run both the build system generator command as well as the
     /// command to build the library.
     pub fn build(&mut self) -> PathBuf {
-        let target = match self.target.clone() {
+        let target_triplet = match self.target.clone() {
             Some(t) => t,
             None => {
                 let mut t = getenv_unwrap("TARGET");
@@ -316,7 +316,7 @@ impl Config {
             }
         };
         let host = self.host.clone().unwrap_or_else(|| getenv_unwrap("HOST"));
-        let msvc = target.contains("msvc");
+        let msvc = target_triplet.contains("msvc");
         let ndk = self.uses_android_ndk();
         let mut c_cfg = cc::Build::new();
         c_cfg
@@ -327,7 +327,7 @@ impl Config {
             .host(&host)
             .no_default_flags(ndk);
         if !ndk {
-            c_cfg.target(&target);
+            c_cfg.target(&target_triplet);
         }
         let mut cxx_cfg = cc::Build::new();
         cxx_cfg
@@ -339,7 +339,7 @@ impl Config {
             .host(&host)
             .no_default_flags(ndk);
         if !ndk {
-            cxx_cfg.target(&target);
+            cxx_cfg.target(&target_triplet);
         }
         if let Some(static_crt) = self.static_crt {
             c_cfg.static_crt(static_crt);
@@ -383,7 +383,7 @@ impl Config {
         if let Some(ref generator) = self.generator {
             is_ninja = generator.to_string_lossy().contains("Ninja");
         }
-        if target.contains("windows-gnu") {
+        if target_triplet.contains("windows-gnu") {
             if host.contains("windows") {
                 // On MinGW we need to coerce cmake to not generate a visual
                 // studio build system but instead use makefiles that MinGW can
@@ -440,22 +440,22 @@ impl Config {
             // This also guarantees that NMake generator isn't chosen implicitly.
             let using_nmake_generator;
             if self.generator.is_none() {
-                cmd.arg("-G").arg(self.visual_studio_generator(&target));
+                cmd.arg("-G").arg(self.visual_studio_generator(&target_triplet));
                 using_nmake_generator = false;
             } else {
                 using_nmake_generator = self.generator.as_ref().unwrap() == "NMake Makefiles";
             }
             if !is_ninja && !using_nmake_generator {
-                if target.contains("x86_64") {
+                if target_triplet.contains("x86_64") {
                     cmd.arg("-Thost=x64");
                     cmd.arg("-Ax64");
-                } else if target.contains("thumbv7a") {
+                } else if target_triplet.contains("thumbv7a") {
                     cmd.arg("-Thost=x64");
                     cmd.arg("-Aarm");
-                } else if target.contains("aarch64") {
+                } else if target_triplet.contains("aarch64") {
                     cmd.arg("-Thost=x64");
                     cmd.arg("-AARM64");
-                } else if target.contains("i686") {
+                } else if target_triplet.contains("i686") {
                     use cc::windows_registry::{find_vs_version, VsVers};
                     match find_vs_version() {
                         Ok(VsVers::Vs16) => {
@@ -468,14 +468,14 @@ impl Config {
                         _ => {}
                     };
                 } else {
-                    panic!("unsupported msvc target: {}", target);
+                    panic!("unsupported msvc target: {}", target_triplet);
                 }
             }
-        } else if target.contains("redox") {
+        } else if target_triplet.contains("redox") {
             if !self.defined("CMAKE_SYSTEM_NAME") {
                 cmd.arg("-DCMAKE_SYSTEM_NAME=Generic");
             }
-        } else if target.contains("solaris") {
+        } else if target_triplet.contains("solaris") {
             if !self.defined("CMAKE_SYSTEM_NAME") {
                 cmd.arg("-DCMAKE_SYSTEM_NAME=SunOS");
             }
